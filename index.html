@@ -1232,23 +1232,14 @@
     /**
      * CONFIGURATION
      * -------------
-     * statsTableUrl is the VM_ASD table (no geometry). Its rows for the latest
-     * annee/mois are summed per region and placed on the region points below.
-     * If the table cannot be read, the labeled demo values are shown instead.
+     * VM_ASD stays private. scripts/export_region_stats.py sums it per region
+     * into region-stats.json (no secret, aggregates only), which this page reads.
+     * If that file cannot be read, the labeled demo values are shown instead.
      */
     const CONFIG = {
-      portalUrl: "https://geoportail.anss.gov.ma/portal",
-      statsTableUrl: "https://geoportail.anss.gov.ma/server/rest/services/Hosted/VM_ASD/FeatureServer/0",
-      // shortcut: sums every row of the latest month; if VM_ASD also holds province/region total rows, filter them here (e.g. "type_ = 'commune'").
-      statsWhere: "1=1",
-      // Key = internal name used by the card and KPIs, value = VM_ASD field summed.
-      statsFields: {
-        eligible: "nombre_dossiers_eligibles",
-        households: "menages",
-        children: "nombre_total_enfants",
-        population: "individus",
-        widows: "cm_veuves"
-      },
+      statsFileUrl: "region-stats.json",
+      // Keys written by the export script, per region row.
+      statsKeys: ["eligible", "households", "children", "population", "widows"],
       basemap: "gray-vector",
       defaultTerritory: "Casablanca-Settat",
       pointZoom: 11,
@@ -1530,37 +1521,18 @@
       }
     }
 
-    // Latest annee/mois in VM_ASD, then the sums of CONFIG.statsFields per region for it.
-    async function loadRegionStats(query) {
-      const url = CONFIG.statsTableUrl;
-      const latest = await query.executeQueryJSON(url, {
-        where: CONFIG.statsWhere,
-        outFields: ["annee", "mois"],
-        orderByFields: ["annee DESC", "mois DESC"],
-        num: 1,
-        returnGeometry: false
-      });
-      const period = latest.features[0]?.attributes;
-      if (!Number.isInteger(period?.annee) || !Number.isInteger(period?.mois)) {
-        throw new Error("VM_ASD : aucune période (annee/mois) trouvée.");
-      }
-
-      const result = await query.executeQueryJSON(url, {
-        where: `(${CONFIG.statsWhere}) AND annee = ${period.annee} AND mois = ${period.mois}`,
-        groupByFieldsForStatistics: ["code_region_hcp", "nom_region"],
-        outStatistics: Object.entries(CONFIG.statsFields).map(([key, field]) => ({
-          statisticType: "sum",
-          onStatisticField: field,
-          outStatisticFieldName: key
-        })),
-        returnGeometry: false
-      });
-      return result.features.map((feature) => feature.attributes);
+    // Region sums exported from VM_ASD by scripts/export_region_stats.py.
+    async function loadRegionStats() {
+      const response = await fetch(CONFIG.statsFileUrl, { cache: "no-cache" });
+      if (!response.ok) throw new Error(`${CONFIG.statsFileUrl} : HTTP ${response.status}`);
+      const data = await response.json();
+      if (!Array.isArray(data.rows) || !data.rows.length) throw new Error(`${CONFIG.statsFileUrl} : aucune ligne.`);
+      return data.rows;
     }
 
     // Puts the VM_ASD region sums on REGIONS: match by name first, then by HCP code.
     function mergeRegionStats(rows) {
-      const keys = Object.keys(CONFIG.statsFields);
+      const keys = CONFIG.statsKeys;
       const nameKey = (value) => normalizeSearchText(value).replace(/[^a-z]/g, "");
       const merged = REGIONS.map((region) => ({ ...region, ...Object.fromEntries(keys.map((key) => [key, null])) }));
 
@@ -1638,23 +1610,18 @@
       elements.mapShell.setAttribute("aria-busy", "true");
       loadingFailsafe = window.setTimeout(finishMapLoading, 1800);
 
-      const [Map, MapView, FeatureLayer, Graphic, GraphicsLayer, esriConfig, reactiveUtils, query] = await $arcgis.import([
+      const [Map, MapView, FeatureLayer, Graphic, GraphicsLayer, reactiveUtils] = await $arcgis.import([
         "@arcgis/core/Map.js",
         "@arcgis/core/views/MapView.js",
         "@arcgis/core/layers/FeatureLayer.js",
         "@arcgis/core/Graphic.js",
         "@arcgis/core/layers/GraphicsLayer.js",
-        "@arcgis/core/config.js",
-        "@arcgis/core/core/reactiveUtils.js",
-        "@arcgis/core/rest/query.js"
+        "@arcgis/core/core/reactiveUtils.js"
       ]);
 
-      if (CONFIG.portalUrl) esriConfig.portalUrl = CONFIG.portalUrl;
-
-      // VM_ASD is secured: the SDK asks for a portal sign-in until the table is shared publicly.
       let statsRows = null;
       try {
-        statsRows = await loadRegionStats(query);
+        statsRows = await loadRegionStats();
       } catch (error) {
         reportArcGISError("Statistiques VM_ASD", error);
       }
